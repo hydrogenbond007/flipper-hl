@@ -1,9 +1,9 @@
-from fastapi import FastAPI, Depends, HTTPException, Header
-from pydantic import BaseModel
-from typing import Optional
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+from typing import Optional, List
+from enum import Enum
 
-from auth import Auth
-from interface import TradingService
+from .interface import TradingService
 import json
 import os
 
@@ -12,55 +12,137 @@ config_path = os.path.join(os.path.dirname(__file__), "../examples/config.json")
 with open(config_path) as f:
     config = json.load(f)
 
-app = FastAPI()
-auth = Auth("your-secret-key")
+app = FastAPI(
+    title="Hyperliquid Trading API",
+    description="REST API for trading on Hyperliquid protocol",
+    version="1.0.0"
+)
+
 trading = TradingService(private_key=config["secret_key"])
 
+class OrderType(str, Enum):
+    LIMIT = "limit"
+    MARKET = "market"
+
 class OrderRequest(BaseModel):
+    asset: str = Field(..., description="Trading pair symbol (e.g. ETH-PERP)")
+    is_buy: bool = Field(..., description="True for buy order, False for sell")
+    size: float = Field(..., gt=0, description="Order size")
+    price: float = Field(..., gt=0, description="Order price (ignored for market orders)")
+    order_type: OrderType = Field(default=OrderType.MARKET, description="Order type")
+
+class MarketOrderRequest(BaseModel):
+    asset: str = Field(..., description="Trading pair symbol (e.g. ETH-PERP)")
+    is_buy: bool = Field(..., description="True for buy order, False for sell")
+    size: float = Field(..., gt=0, description="Order size")
+
+class Position(BaseModel):
     asset: str
-    is_buy: bool
+    size: float
+    entry_price: float
+    unrealized_pnl: float
+
+class Order(BaseModel):
+    asset: str
+    order_id: str
     size: float
     price: float
-    order_type: Optional[dict] = None
+    is_buy: bool
+    status: str
 
-async def get_wallet_address(authorization: str = Header(None)):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
-    wallet_address = auth.verify_auth_token(authorization.split(" ")[1])
-    if not wallet_address:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    
-    return wallet_address
+class MarketInfo(BaseModel):
+    asset: str
+    mark_price: float
+    index_price: float
+    open_interest: float
+    funding_rate: float
 
-@app.post("/place_order")
-async def place_order(order_data: dict):
-    return trading.place_order(
-        order_data["wallet_address"],
-        order_data["asset"],
-        order_data["is_buy"],
-        order_data["size"],
-        order_data["price"],
-        order_data["order_type"]
-    )
+@app.get("/market/{asset}", response_model=MarketInfo, tags=["market"])
+async def get_market_info(asset: str):
+    """
+    Get current market information for an asset
+    """
+    try:
+        return trading.get_market_info(asset)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-@app.get("/positions/{wallet_address}")
-async def get_positions(wallet_address: str):
-    return trading.get_positions(wallet_address)
+@app.post("/market_order", response_model=Order, tags=["trading"])
+async def place_market_order(order: MarketOrderRequest):
+    """
+    Place a market order (executes immediately at market price)
+    """
+    try:
+        return trading.place_market_order(
+            config["account_address"],
+            order.asset,
+            order.is_buy,
+            order.size
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-@app.post("/api/cancel/{asset}/{order_id}")
-async def cancel_order(asset: str, order_id: str, wallet_address: str = Depends(get_wallet_address)):
-    result = trading.cancel_order(wallet_address, asset, order_id)
-    return result
+@app.post("/limit_order", response_model=Order, tags=["trading"])
+async def place_limit_order(order: OrderRequest):
+    """
+    Place a limit order at a specific price
+    """
+    try:
+        return trading.place_limit_order(
+            config["account_address"],
+            order.asset,
+            order.is_buy,
+            order.size,
+            order.price
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-@app.delete("/api/close/{asset}/{order_id}")
-async def close_position(asset: str, order_id: str, wallet_address: str = Depends(get_wallet_address)):
-    result = trading.close_position(wallet_address, asset, order_id)
-    return result
+@app.get("/positions", response_model=List[Position], tags=["trading"])
+async def get_positions():
+    """
+    Get all open positions
+    """
+    try:
+        return trading.get_positions(config["account_address"])
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-@app.get("/api/open_orders")
-async def get_open_orders(wallet_address: str = Depends(get_wallet_address)):
-    result = trading.get_open_orders(wallet_address)
-    return result
+@app.post("/cancel/{asset}/{order_id}", tags=["trading"])
+async def cancel_order(asset: str, order_id: str):
+    """
+    Cancel an existing order
+    """
+    try:
+        result = trading.cancel_order(config["account_address"], asset, order_id)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.delete("/close/{asset}/{order_id}", tags=["trading"])
+async def close_position(asset: str, order_id: str):
+    """
+    Close an existing position
+    """
+    try:
+        result = trading.close_position(config["account_address"], asset, order_id)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/open_orders", response_model=List[Order], tags=["trading"])
+async def get_open_orders():
+    """
+    Get all open orders
+    """
+    try:
+        result = trading.get_open_orders(config["account_address"])
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
 
 
